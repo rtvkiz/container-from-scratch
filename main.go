@@ -2,16 +2,14 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strconv"
 	"syscall"
+
+	cap "github.com/syndtr/gocapability/capability"
 )
 
 func main() {
-
 	switch os.Args[1] {
 	case "run":
 		run()
@@ -23,15 +21,16 @@ func main() {
 
 func run() {
 	cmd := exec.Command("/proc/self/exe", append([]string{"child"}, os.Args[2:]...)...)
-
+	fmt.Print(os.Getpid())
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags: syscall.CLONE_NEWUTS | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS | syscall.CLONE_NEWUSER,
+
+		Cloneflags: syscall.CLONE_NEWUTS | syscall.CLONE_NEWPID | syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS,
 		Credential: &syscall.Credential{Uid: 0, Gid: 0},
 		UidMappings: []syscall.SysProcIDMap{
-			{ContainerID: 0, HostID: os.Getuid(), Size: 1},
+			{ContainerID: 0, HostID: 10000, Size: 1},
 		},
 		GidMappings: []syscall.SysProcIDMap{
-			{ContainerID: 0, HostID: os.Getgid(), Size: 1},
+			{ContainerID: 0, HostID: 10000, Size: 1},
 		},
 	}
 	fmt.Println("executing command:", cmd.String(), os.Getpid())
@@ -44,46 +43,53 @@ func run() {
 		panic(err)
 	}
 	// fmt.Println("Command executed successfully")
-
 }
 
 func child() {
-	cmd := exec.Command(os.Args[2], os.Args[3:]...)
-	// cmd.Dir = "/home/rtvkiz"
-	fmt.Println("executing command:", cmd.String(), os.Getpid())
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin
+	process := os.Getpid()
+	fmt.Printf("child pid: %d\n", process)
+
+	caps, _ := cap.NewPid2(process)
+
+	// First clear all capability sets
+	caps.Clear(cap.EFFECTIVE)
+	caps.Clear(cap.AMBIENT)
+	caps.Clear(cap.BOUNDING)
+	caps.Clear(cap.PERMITTED)
+
+	// Add only the ones you want to all relevant sets
+	caps.Set(cap.EFFECTIVE|cap.PERMITTED|cap.BOUNDING,
+		cap.CAP_SYS_ADMIN,
+		cap.CAP_NET_ADMIN,
+		cap.CAP_SYS_CHROOT,
+		cap.CAP_SYS_PTRACE,
+	)
+
+	// Apply the changes
+	// Apply the changes, including the Bounding set
+if err := caps.Apply(cap.EFFECTIVE | cap.PERMITTED | cap.BOUNDING); err != nil {
+    panic(err)
+}
+
+	fmt.Printf("Capabilities applied: %s\n", caps.String())
+
+	// Optional: enter a minimal environment
 	if err := syscall.Sethostname([]byte("container")); err != nil {
 		panic(err)
 	}
-	cg()
-	syscall.Chroot("/root/Learning/rootfs")
+	// syscall.Chroot("/home/low/rootfs")
 	syscall.Chdir("/")
 	syscall.Mount("proc", "proc", "proc", 0, "")
-	err := cmd.Run()
+
+	cmd := exec.Command(os.Args[2], os.Args[3:]...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		panic(err)
+	}
+
 	syscall.Unmount("proc", 0)
-	if err != nil {
-		panic(err)
-	}
-
-	// fmt.Println("Command executed successfully")
-
 }
 
-// changed the implementation based on CGROUPv2
 
-func cg() {
-	cgroups := "/sys/fs/cgroup/"
-	pids := filepath.Join(cgroups, "pids")
-	os.Mkdir(filepath.Join(pids, "rtvkiz"), 0755)
-	must(ioutil.WriteFile(filepath.Join(pids, "pids.max"), []byte("30"), 0700))
-	// Removes the new cgroup in place after the container exits
-	// must(ioutil.WriteFile(filepath.Join(pids, "notify_on_release"), []byte("1"), 0700))
-	must(ioutil.WriteFile(filepath.Join(pids, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0700))
-}
-func must(err error) {
-	if err != nil {
-		panic(err)
-	}
-}
